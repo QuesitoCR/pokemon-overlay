@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Pokemon OR Overlay</title>
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@400;700;900&display=swap');
+
+  :root {
+    --slot-size: 120px;
+    --gap: 8px;
+    --name-size: 9.5px;
+    --name-color: #e8f0ff;
+    --border: rgba(255,255,255,0.08);
+    --bg: rgba(10,12,20,0.92);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: transparent; font-family: 'Exo 2', sans-serif; overflow: hidden; }
+
+  #party {
+    display: flex;
+    gap: var(--gap);
+    padding: 10px;
+    position: fixed;
+    bottom: 0; left: 0;
+    width: 100%;
+    justify-content: center;
+  }
+
+  .slot {
+    width: var(--slot-size);
+    height: 80px;
+    background: linear-gradient(135deg, var(--bg) 0%, rgba(20,24,40,0.88) 100%);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+    transition: all 0.4s cubic-bezier(0.34,1.56,0.64,1);
+    opacity: 0.25;
+    transform: translateY(6px);
+    backdrop-filter: blur(10px);
+  }
+  .slot.active {
+    opacity: 1; transform: translateY(0);
+    border-color: rgba(255,255,255,0.15);
+    box-shadow: 0 0 20px rgba(99,179,237,0.15), 0 4px 24px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08);
+  }
+  .slot.active::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, rgba(99,179,237,0.8), transparent);
+  }
+  .slot.fainted { filter: grayscale(0.8) brightness(0.6); border-color: rgba(255,80,80,0.2) !important; }
+  .slot.manual  { border-color: rgba(255,200,50,0.3); }
+  .slot.manual::before { background: linear-gradient(90deg, transparent, rgba(255,200,50,0.6), transparent); }
+
+  .sprite-wrap { width: 52px; height: 48px; position: relative; margin-bottom: 2px; }
+  .sprite {
+    width: 52px; height: 48px;
+    object-fit: contain; image-rendering: pixelated;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.6));
+  }
+  .slot.active .sprite { animation: spriteBounce 3s ease-in-out infinite; }
+
+  .shiny-badge { position: absolute; top: -2px; right: -4px; font-size: 9px; display: none; }
+  .shiny .shiny-badge { display: block; }
+
+  .poke-name {
+    font-weight: 700; font-size: var(--name-size); color: var(--name-color);
+    text-transform: uppercase; letter-spacing: 0.04em;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 108px; text-align: center;
+  }
+  .poke-level { font-size: 7.5px; color: rgba(160,180,220,0.7); margin-top: 1px; letter-spacing: 0.06em; }
+
+  .hp-bar-wrap { width: 90%; height: 3px; background: rgba(255,255,255,0.08); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+  .hp-bar { height: 100%; border-radius: 2px; transition: width 0.6s ease, background-color 0.4s ease; }
+
+  .status-badge {
+    position: absolute; top: 5px; left: 6px;
+    font-size: 6px; font-weight: 900;
+    padding: 1px 4px; border-radius: 3px;
+    letter-spacing: 0.05em; text-transform: uppercase;
+  }
+  .status-psn { background:#6b21a8; color:#e9d5ff; }
+  .status-brn { background:#9a3412; color:#fed7aa; }
+  .status-par { background:#713f12; color:#fef08a; }
+  .status-slp { background:#374151; color:#d1d5db; }
+  .status-fzn { background:#164e63; color:#a5f3fc; }
+
+  .empty-icon { width:32px; height:32px; border:1.5px solid rgba(255,255,255,0.06); border-radius:50%; display:flex; align-items:center; justify-content:center; }
+  .empty-icon::after { content:''; width:14px; height:14px; border:1.5px solid rgba(255,255,255,0.1); border-radius:50%; }
+
+  #conn-error {
+    position:fixed; bottom:100px; left:50%; transform:translateX(-50%);
+    background:rgba(220,38,38,0.85); color:white;
+    padding:5px 14px; border-radius:8px;
+    font-size:10px; font-weight:700; letter-spacing:0.05em;
+    display:none; backdrop-filter:blur(8px);
+  }
+
+  @keyframes slotIn {
+    from { opacity:0; transform:translateY(16px) scale(0.9); }
+    to   { opacity:1; transform:translateY(0) scale(1); }
+  }
+  .entering { animation: slotIn 0.4s cubic-bezier(0.34,1.56,0.64,1) forwards; }
+
+  @keyframes spriteBounce {
+    0%,100% { transform:translateY(0); }
+    50%     { transform:translateY(-3px); }
+  }
+</style>
+</head>
+<body>
+<div id="conn-error">⚠ Sin conexión a PokeLink</div>
+<div id="party"></div>
+
+<script>
+// ─── Config ──────────────────────────────────────────────────────────────────
+let POKELINK_USER = new URLSearchParams(location.search).get('user') || 'xmax';
+const POKELINK_PORT = 3000;
+const SLOT_COUNT    = 6;
+const IMG_BASE      = 'https://img.pokemondb.net/sprites/black-white/anim/normal';
+const IMG_FALLBACK  = 'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon';
+
+// ─── Estado ──────────────────────────────────────────────────────────────────
+function emptySlot() {
+  return { name:'', level:0, hpPct:1, status:'', shiny:false, fainted:false, dexNum:0, manual:false };
+}
+const state = { slots: Array.from({length:SLOT_COUNT}, emptySlot) };
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function spriteGif(name) {
+  const n = (name||'').toLowerCase()
+    .replace(/\s+/g,'-').replace(/['.]/g,'')
+    .replace(/♀/g,'-f').replace(/♂/g,'-m');
+  return `${IMG_BASE}/${n}.gif`;
+}
+function spriteFallback(dexNum) {
+  return dexNum ? `${IMG_FALLBACK}/${dexNum}.png` : `${IMG_FALLBACK}/0.png`;
+}
+function hpColor(p) {
+  if (p > 0.5) return 'linear-gradient(90deg,#22c55e,#4ade80)';
+  if (p > 0.25) return 'linear-gradient(90deg,#eab308,#fde047)';
+  return 'linear-gradient(90deg,#ef4444,#f87171)';
+}
+function statusInfo(st) {
+  if (!st) return {cls:'',lbl:''};
+  const map = {psn:{cls:'status-psn',lbl:'TOX'}, brn:{cls:'status-brn',lbl:'QEM'},
+               par:{cls:'status-par',lbl:'PAR'}, slp:{cls:'status-slp',lbl:'DOR'},
+               frz:{cls:'status-fzn',lbl:'HEL'}, fzn:{cls:'status-fzn',lbl:'HEL'}};
+  if (typeof st === 'string') return map[st] || {cls:'',lbl:''};
+  for (const k of Object.keys(map)) if (st[k]) return map[k];
+  return {cls:'',lbl:''};
+}
+function normName(s) {
+  return (s||'').trim().toLowerCase().replace(/\s+/g,'-').replace(/[^a-z0-9\-_.]/g,'');
+}
+
+// ─── Render ───────────────────────────────────────────────────────────────────
+const partyEl = document.getElementById('party');
+const slotEls = [];
+for (let i = 0; i < SLOT_COUNT; i++) {
+  const el = document.createElement('div');
+  el.className = 'slot';
+  el.innerHTML = '<div class="empty-icon"></div>';
+  partyEl.appendChild(el);
+  slotEls.push(el);
+}
+
+function renderSlot(i) {
+  const s  = state.slots[i];
+  const el = slotEls[i];
+  if (!s.name) {
+    el.className = 'slot';
+    el.innerHTML = '<div class="empty-icon"></div>';
+    return;
+  }
+  const {cls, lbl} = statusInfo(s.status);
+  const hpW = Math.round((s.hpPct||1)*100);
+  const gif = spriteGif(s.name);
+  const fb  = spriteFallback(s.dexNum);
+  el.className = ['slot','active',
+    s.shiny?'shiny':'', s.fainted?'fainted':'', s.manual?'manual':'','entering'
+  ].filter(Boolean).join(' ');
+  setTimeout(()=>el.classList.remove('entering'), 500);
+  el.innerHTML = `
+    ${lbl ? `<div class="status-badge ${cls}">${lbl}</div>` : ''}
+    <div class="sprite-wrap">
+      <img class="sprite" src="${gif}" onerror="this.onerror=null;this.src='${fb}'" alt="${s.name}">
+      ${s.shiny ? '<span class="shiny-badge">✦</span>' : ''}
+    </div>
+    <div class="poke-name">${s.name}</div>
+    ${s.level ? `<div class="poke-level">Nv. ${s.level}</div>` : ''}
+    <div class="hp-bar-wrap">
+      <div class="hp-bar" style="width:${hpW}%;background:${hpColor(s.hpPct||1)}"></div>
+    </div>`;
+}
+function render() { for(let i=0;i<SLOT_COUNT;i++) renderSlot(i); }
+
+// ─── PokeLink ─────────────────────────────────────────────────────────────────
+const errEl = document.getElementById('conn-error');
+
+function applyParty(party) {
+  for (let i = 0; i < SLOT_COUNT; i++) {
+    if (state.slots[i].manual) continue; // respetar overrides manuales
+    const entry = party[i];
+    if (!entry?.pokemon?.speciesName) {
+      state.slots[i] = emptySlot();
+    } else {
+      const p = entry.pokemon;
+      const hp = p.hp || {};
+      state.slots[i] = {
+        name:    p.speciesName,
+        level:   p.level || 0,
+        hpPct:   hp.max ? hp.current/hp.max : 1,
+        status:  p.status || '',
+        shiny:   !!p.isShiny,
+        fainted: (hp.current||0) === 0,
+        dexNum:  p.species || 0,
+        manual:  false,
+      };
+    }
+    renderSlot(i);
+  }
+}
+
+(function connectPokelink() {
+  const socket = io(`http://localhost:${POKELINK_PORT}`, {
+    transports:['websocket'], reconnection:true, reconnectionDelay:3000
+  });
+  socket.on('connect', () => {
+    errEl.style.display = 'none';
+    socket.emit('client:join', { username: POKELINK_USER });
+  });
+  socket.on('disconnect',    () => errEl.style.display = 'block');
+  socket.on('connect_error', () => errEl.style.display = 'block');
+
+  socket.on('client:party:updated', (d) => {
+    if (d.username === POKELINK_USER && d.update?.party) applyParty(d.update.party);
+  });
+  socket.on('client:players:list', (players) => {
+    const me = players?.find(p=>p.username===POKELINK_USER);
+    if (me?.party) applyParty(me.party);
+  });
+  socket.on('party:updated', (d) => { if(d?.party) applyParty(d.party); });
+})();
+
+// ─── Comandos de chat ─────────────────────────────────────────────────────────
+let fieldData = {};
+
+function isAllowed(ev) {
+  if (fieldData.allowEveryone) return true;
+  const badges = ev.badges||ev.data?.badges||[];
+  const tags   = ev.tags  ||ev.data?.tags  ||[];
+  const has = (arr,kw) => Array.isArray(arr) && arr.some(x=>String(x.type||x.name||x||'').toLowerCase().includes(kw));
+  return has(badges,'mod')||has(badges,'broadcaster')||has(tags,'mod')||has(tags,'broadcaster');
+}
+function getText(ev) {
+  return ev?.text||ev?.message||ev?.data?.text||ev?.data?.message||ev?.data?.body||'';
+}
+
+function setManual(idx, nameRaw) {
+  state.slots[idx] = {
+    name:    nameRaw.trim(),
+    level:   0, hpPct:1, status:'',
+    shiny:   false, fainted:false, dexNum:0, manual:true
+  };
+  renderSlot(idx);
+}
+
+function handleCommand(text, ev) {
+  const raw = (text||'').trim();
+  if (!raw.startsWith('!')) return;
+  const parts = raw.split(/\s+/);
+  const cmd   = parts[0].toLowerCase();
+  const arg1  = parts[1]||'';
+  const rest  = parts.slice(1).join(' ').trim();
+
+  // !slot1 pikachu … !slot6 mewtwo
+  const mSlot = cmd.match(/^!slot([1-6])$/);
+  if (mSlot) {
+    if (!isAllowed(ev)||!rest) return;
+    setManual(Number(mSlot[1])-1, rest);
+    return;
+  }
+  // !borrar slot1 / !borrar 1
+  if (cmd === '!borrar') {
+    if (!isAllowed(ev)) return;
+    const m2 = arg1.toLowerCase().match(/^(?:slot)?([1-6])$/);
+    if (m2) { state.slots[Number(m2[1])-1] = emptySlot(); renderSlot(Number(m2[1])-1); }
+    return;
+  }
+  // !reset — limpia overrides y deja retomar a PokeLink
+  if (['!reset','!reiniciar','!resetslots','!reiniciarslots'].includes(cmd)) {
+    if (!isAllowed(ev)) return;
+    state.slots = Array.from({length:SLOT_COUNT}, emptySlot);
+    render();
+    return;
+  }
+}
+
+// ─── StreamElements hooks ─────────────────────────────────────────────────────
+window.addEventListener('onWidgetLoad', (obj) => {
+  fieldData = obj?.detail?.fieldData || {};
+  const fd = fieldData;
+  const css = document.documentElement.style;
+  if (fd.slotSize)    css.setProperty('--slot-size',  fd.slotSize+'px');
+  if (fd.gap)         css.setProperty('--gap',         fd.gap+'px');
+  if (fd.nameSize)    css.setProperty('--name-size',   fd.nameSize+'px');
+  if (fd.nameColor)   css.setProperty('--name-color',  fd.nameColor);
+  if (fd.borderColor) css.setProperty('--border',      fd.borderColor);
+  if (fd.cardBg)      css.setProperty('--bg',          fd.cardBg);
+  if (fd.polkelinkUser) POKELINK_USER = fd.polkelinkUser;
+});
+
+window.addEventListener('onEventReceived', (obj) => {
+  const listener = obj?.detail?.listener;
+  const ev       = obj?.detail?.event || {};
+  if (['message','chat','chat:message','bot:message'].includes(listener))
+    handleCommand(getText(ev), ev);
+});
+</script>
+</body>
+</html>
